@@ -1,0 +1,2 @@
+This file activates personal-to-organization sync on the new organization repository.
+It is excluded from upstream code patches.
