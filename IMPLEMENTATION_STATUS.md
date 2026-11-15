@@ -36,6 +36,7 @@ Local checks: Python regression suite; workspace non-native tests; release nativ
 - `plan --json` reuses native graph validation to derive workspace/KV coefficients without loading weights or allocating activation/KV arenas. Metadata-only reads are bounded to the GGUF metadata prefix.
 - `chat --auto-context` explicitly selects and reports a reduced feasible context; no prompt truncation. Optional incremental admission budgets share cache/verification/runtime/OS reserves. Native execution still rechecks its own workspace requirement.
 - Planning budgets are estimates of additional allocations, not total RSS. Linux address-space enforcement remains separate; auto-planning under a cap intersects current remaining virtual headroom. Verified auto-planning authenticates before native metadata inspection.
+- Cooperative MemoryBudget capacity can now shrink/grow while retaining admitted charges. A synchronized snapshot reports headroom/debt; queued native calls wait/resume or cancel against the current capacity. No automatic pressure sampling or OS reclamation is implied. See `docs/DYNAMIC_MEMORY_BUDGET.md`.
 - Exact native budget boundary and real-model CLI protocols are included. Full hardware/model scheduling, real 2GB-host validation, SIMD/thread adaptation and I/O/compute feasibility remain incomplete. See `docs/STREAMED_MEMORY_PLANNING.md`.
 
 ## M3 — measured session performance checkpoint
@@ -97,6 +98,24 @@ M3 now has native-derived CLI/context admission, not a complete adaptive schedul
 
 ## Queued native streamed execution checkpoint
 
-- FIFO admission now wraps actual controlled streamed generation, carrying trusted-hash/cache control and holding an atomic reservation through native execution and consumer callbacks. Waiting performs no model I/O; pending-ticket and running-reservation cleanup use RAII.
+- FIFO admission now wraps actual controlled streamed generation, carrying trusted-hash/cache control and holding an atomic reservation through native execution and consumer callbacks. Waiting performs no model I/O; pending-ticket and running-reservation cleanup use RAII. Explicit queue pause/resume now gates new reservations under the same lock, while pending cancellation and already-admitted work remain live; see `docs/PAUSED_ADMISSION.md`.
 - Charge arithmetic includes workspace/source/cache/authentication ceilings plus an explicit caller metadata/runtime allowance. This is cooperative accounted admission, not whole-process RSS enforcement or an automatic CLI scheduler.
 - Queue-scoped ticket identities prevent cross-queue cancellation/admission collisions. Regression and real-model protocols cover cleanup, cancellation, capacity and complete-output/all-logit equality. See `docs/QUEUED_STREAMED_INFERENCE.md`.
+
+## Planned concurrent streamed sessions checkpoint
+
+- A shared `StreamedExecutor` now applies CPU/RAM worker planning to actual queued generation. Full fixed session slots enforce both accounted capacity and simultaneous-session count even for smaller requests; oversized charges fail before enqueue/model I/O.
+- Existing FIFO/cancellation/authentication and reservation cleanup are forwarded without new native numerical code or ABI. Callers own threads and output handling; construction uses a point-in-time memory snapshot and estimates, not a process RSS limit or live pressure scheduler.
+- Real cold-start overlapping sessions, direct full-output/all-logit comparison, smaller-request waiting/cancellation and zero-final-charge protocols are required. See `docs/STREAMED_EXECUTOR.md`.
+
+## Shared executor admission controls checkpoint
+
+- The executor now exposes explicit pause/resume, live capacity resizing and a consistent budget snapshot. Increases cannot exceed its construction-time CPU/RAM plan. Shrinking retains active slots and pending cancellation, while zero capacity refuses new enqueue work; growth and resume are independent. No automatic pressure sampling, worker-plan expansion, forced reclamation or RSS guarantee is implied. See `docs/STREAMED_EXECUTOR.md`.
+
+## Sampled executor memory-pressure checkpoint
+
+- An opt-in OS/cgroup-aware admission gate samples before and during queued generation polls, fails closed on unknown headroom and uses separate low/high thresholds for recovery hysteresis. Pressure recovery cannot clear manual pause; active reservations remain valid. Sampling is shared/throttled, with no background monitor or worker replanning. This is cooperative sampled admission, not a physical memory/RSS guarantee. See `docs/EXECUTOR_MEMORY_PRESSURE.md`.
+
+## Bounded admission waiting checkpoint
+
+- Opt-in queued/executor timeout APIs bound cooperative admission waiting, including pressure sampling, with zero-time refusal and RAII cleanup of expired FIFO tickets. Existing methods keep indefinite waiting/cancellation. Already-admitted native work can finish beyond the waiting budget. Checks cover sampler delay, exact/maximum duration boundaries and real native recovery; neither hard wall-clock return nor end-to-end inference deadlines are implied. See `docs/ADMISSION_WAIT_TIMEOUT.md`.

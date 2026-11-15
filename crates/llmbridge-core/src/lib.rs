@@ -13,6 +13,7 @@ pub mod f32_swiglu;
 pub mod io_schedule;
 pub mod memory_budget;
 pub mod memory_plan;
+pub mod memory_pressure;
 #[cfg(feature = "native")]
 pub mod q8_batch;
 #[cfg(feature = "native")]
@@ -29,6 +30,9 @@ pub mod queued_streamed;
 
 #[cfg(feature = "native")]
 pub mod streamed;
+
+#[cfg(feature = "native")]
+pub mod streamed_executor;
 
 pub mod read_cache;
 
