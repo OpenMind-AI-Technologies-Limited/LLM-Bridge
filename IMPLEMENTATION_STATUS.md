@@ -92,6 +92,10 @@ Local checks: Python regression suite; workspace non-native tests; release nativ
 - Group contiguous matrix rows within the existing packed buffer, preserving per-row dot order/cancellation and exact tensor boundaries. No extra weight buffer or asynchronous worker. Range metrics distinguish total/weight callback counts and bytes from source I/O. Authenticated metadata callbacks use bounded reads from the already sealed prefix, preventing repeated whole-block hashing for tiny GGUF fields.
 - Real-model chunk geometry, independent reference and cancellation/integrity contracts validate this change separately. Historical authenticated-cache speed/read-count evidence is not current-policy evidence. Configured authenticated cache reservations remain accounted until release/teardown. See `docs/BOUNDED_ROW_BATCHING.md`.
 
+## Cooperative native execution deadline checkpoint
+
+- The direct streamed API now accepts an opt-in absolute deadline observed during authentication, native polling/range reads and consumer boundaries. Expiry aborts without setting the caller cancellation flag and retains trusted-source/cleanup semantics. Queued/executor limits can carry the same absolute deadline from waiting through native work; existing timeout APIs still bound waiting only. Expired tickets/charges clean up through RAII without changing policy controls. No preemption, hard wall-clock return, CLI propagation or physical low-RAM result is implied. See `docs/STREAMED_EXECUTION_DEADLINE.md`.
+
 ## M3–M11
 
 M3 now has native-derived CLI/context admission, not a complete adaptive scheduler. M4 remote providers, M5 MoE, M6 GPU, M7 API/SDK, M8 desktop, M9 full robustness/benchmarks, M10 format/plugin extensibility and M11 large-model feasibility remain incomplete. No 70B/550B or real 2GB-machine result is claimed.
@@ -119,3 +123,15 @@ M3 now has native-derived CLI/context admission, not a complete adaptive schedul
 ## Bounded admission waiting checkpoint
 
 - Opt-in queued/executor timeout APIs bound cooperative admission waiting, including pressure sampling, with zero-time refusal and RAII cleanup of expired FIFO tickets. Existing methods keep indefinite waiting/cancellation. Already-admitted native work can finish beyond the waiting budget. Checks cover sampler delay, exact/maximum duration boundaries and real native recovery; neither hard wall-clock return nor end-to-end inference deadlines are implied. See `docs/ADMISSION_WAIT_TIMEOUT.md`.
+
+## Streamed batch CLI checkpoint
+
+- `llmbridge batch` connects caller-visible file input/output to one shared executor with a fixed planned worker set, per-line input bounds, direct file streaming, optional trusted digest/pressure policy and bounded admission waiting. First-error/Ctrl+C cancellation joins workers and retains unfinished `.partial` outputs. Atomic no-replace result publication requires hard-link support. This is not a server, restart/resume engine or RSS guarantee. See `docs/BATCH_CLI.md`.
+
+## Batch main integration checkpoint
+
+- #90 merged into the prior admission-timeout branch after #89 had already reached main. This integration brings those reviewed batch changes to main; it also shares the native prompt ceiling with batch validation so unsupported larger line buffers fail before I/O. Historical evidence retains its original branch/source context.
+
+## CLI execution deadline checkpoint
+
+- `--deadline-ms` exposes the cooperative deadline to streamed chat (starting before preflight) and batch (a fresh budget before each job admission). Resident chat rejects the option; old defaults and waiting-only timeout semantics remain. Trust/cache controls and protected partial outputs are preserved. This is not preemption, a hard process-exit bound or RSS enforcement. See `docs/CLI_EXECUTION_DEADLINES.md`.

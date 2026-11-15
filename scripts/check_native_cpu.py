@@ -65,14 +65,17 @@ def main():
                 ('resident', ['chat', '/absent-cpu-fixture.gguf', '--prompt', 'fixture']),
                 ('streamed', ['chat', '/absent-cpu-fixture.gguf', '--prompt', 'fixture', '--backend', 'streamed']),
                 ('verified_streamed', ['chat', '/absent-cpu-fixture.gguf', '--prompt', 'fixture', '--backend', 'streamed', '--sha256', '0' * 64]),
+                ('batch', ['batch', '/absent-cpu-fixture.gguf', '--input', '/absent-prompts.txt', '--output-dir', '/absent-cpu-output']),
+                ('deadline_streamed', ['chat', '/absent-cpu-fixture.gguf', '--prompt', 'fixture', '--backend', 'streamed', '--deadline-ms', '30000']),
+                ('deadline_batch', ['batch', '/absent-cpu-fixture.gguf', '--input', '/absent-deadline-input.txt', '--output-dir', '/absent-deadline-output', '--deadline-ms', '30000']),
                 ('plan', ['plan', '/absent-cpu-fixture.gguf'])]:
                 result = run(name, binary, command)
                 assert result.returncode == 1 and not result.stdout
                 assert b'native CPU incompatible' in result.stderr
             result = run('library_entry_paths', contract, [])
             assert result.returncode == 0
-            assert b'sixteen Rust native execution/probe paths rejected before FFI: PASS' in result.stdout
-            report['library_paths_checked'] = 16
+            assert b'nineteen Rust native execution/probe paths rejected before FFI: PASS' in result.stdout
+            report['library_paths_checked'] = 19
             report['pass'] = True
         except (OSError, subprocess.SubprocessError, ValueError, AssertionError, KeyError, IndexError) as error:
             report['error'] = type(error).__name__ + ': ' + str(error)

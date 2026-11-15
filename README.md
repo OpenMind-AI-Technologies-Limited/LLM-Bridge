@@ -30,26 +30,154 @@ These are **engineering targets**, not a list of completed features. See [AGENTS
 
 ## Architecture: current components and intended connection
 
-```text
-                  CLI / future applications
-                            |
-                  Rust control plane
-             hardware / admission / cancellation
-                            |
-       GGUF index ---- source identity / integrity
-                            |
-        bounded local reader / tensor range provider
-                            |
-         verified chunk cache / reusable staging
-                            |
-          native C ABI ---- C++ / ggml kernels
-                            |
-              model graph / prefill / decode
-                            |
-                  tokens / logits / metrics
+The diagrams separate **what runs today** from the larger roadmap. Solid arrows show implemented request/data flow. The resident backend and the experimental streamed backend are different execution paths; the streamed backend does **not** silently fall back to the resident weight loader.
+
+### 1. Requests, planning and backend selection
+
+```mermaid
+flowchart LR
+    subgraph Entry["Entry points"]
+        Chat["CLI chat / Rust library"]
+        Batch["CLI batch"]
+        Tools["doctor / plan / model inspection"]
+    end
+
+    subgraph Control["Rust control plane"]
+        CPU["CPU ISA checks + hardware / cgroup profiling"]
+        Plan["Context, KV, workspace + cache admission"]
+        Select{"CPU backend?"}
+        Queue["Batch worker slots + FIFO admission<br/>Shared memory reservations"]
+    end
+
+    Chat r1@--> CPU
+    Tools r2@--> CPU
+    CPU r3@--> Plan
+    Plan r4@--> Select
+    Batch r5@--> Queue
+    Plan r6@-->|"budget inputs"| Queue
+
+    Select r7@-->|"resident (default)"| Resident["Pinned llama.cpp resident-weight CPU graph"]
+    Select r8@-->|"streamed (explicit)"| Streamed["Experimental bounded streamed Llama session"]
+    Queue r9@-->|"admitted streamed job"| Streamed
+
+    Resident r10@--> Output["Tokens / optional logits / metrics"]
+    Streamed r11@--> Output
+
+    %% Animated connections are optional in older Mermaid renderers.
+    r1@{ animation: fast }
+    r2@{ animation: slow }
+    r3@{ animation: fast }
+    r4@{ animation: fast }
+    r5@{ animation: fast }
+    r6@{ animation: slow }
+    r7@{ animation: fast }
+    r8@{ animation: fast }
+    r9@{ animation: fast }
+    r10@{ animation: fast }
+    r11@{ animation: fast }
 ```
 
-**Execution paths:** Normal generation defaults to the pinned llama.cpp resident backend. `--backend streamed` uses the experimental complete dense-Llama decoder with bounded Rust tensor reads, native ggml kernels and FP32 KV. It loads only tokenizer metadata through upstream's vocabulary-only path. The full cache/prefetch/scheduler integration shown above remains a target.
+**What this means:** `chat` defaults to the pinned llama.cpp resident model-loading path. `chat --backend streamed` selects the separately implemented dense-Llama decoder. The `batch` CLI uses an admitted streamed-worker path with cooperative FIFO reservations; those reservations budget configured resources, **not whole-process RSS**. `doctor` and `plan` inspect capabilities and admission constraints without generating tokens.
+
+### 2. Inside the streamed inference path
+
+```mermaid
+flowchart LR
+    Session["Streamed model session"]
+    Index["GGUF index: tensor shapes, types,<br/>offsets, range bounds + source identity"]
+    Trust{"Trusted SHA-256 supplied?"}
+    Verified["Linux verified session:<br/>sealed tokenizer metadata + per-block checks"]
+    Unverified["Unverified session:<br/>source identity and bounds checks"]
+    Reader["Bounded local tensor range reads"]
+    Cache["Optional budgeted read cache / read-ahead<br/>or direct ranges"]
+    Vocab["Pinned llama.cpp vocabulary-only tokenizer"]
+    Native["Versioned Rust / C++ boundary<br/>pinned ggml CPU operators"]
+    Decoder["Dense-Llama prefill + decode:<br/>embedding, RMSNorm, RoPE, GQA,<br/>SwiGLU, residuals, output head"]
+    Memory["Budgeted activations + FP32 KV cache"]
+    Output["Greedy tokens + optional logits<br/>range, memory + timing metrics"]
+
+    Session s1@--> Index
+    Index s2@--> Trust
+    Trust s3@-->|"yes, supported Linux path"| Verified
+    Trust s4@-->|"no"| Unverified
+    Verified s5@--> Reader
+    Unverified s6@--> Reader
+    Verified s7@--> Vocab
+    Unverified s8@--> Vocab
+    Reader s9@--> Cache
+    Cache s10@--> Native
+    Native s11@--> Decoder
+    Vocab s12@--> Decoder
+    Memory s13@--> Decoder
+    Decoder s14@--> Output
+
+    %% Each executed data path animates; no remote model support is implied.
+    s1@{ animation: fast }
+    s2@{ animation: fast }
+    s3@{ animation: fast }
+    s4@{ animation: fast }
+    s5@{ animation: fast }
+    s6@{ animation: fast }
+    s7@{ animation: slow }
+    s8@{ animation: slow }
+    s9@{ animation: fast }
+    s10@{ animation: fast }
+    s11@{ animation: fast }
+    s12@{ animation: slow }
+    s13@{ animation: slow }
+    s14@{ animation: fast }
+```
+
+**Bounds and security:** Tensor weights reach native streamed operators through bounded Rust range reads; native upstream loading is vocabulary-only. Session-local caching is optional and disabled by default. Authenticated reads follow the verified-session policy (including per-range revalidation and cache bypass where required); the cache box is **not** an unconditional authenticated-cache hit. Cancellation and cooperative deadlines are checked at supported read, native polling and callback boundaries; a blocking native operation is not preempted.
+
+**Measured scope:** The pinned tiny 15M Q8 GGUF has independent output/logit parity evidence under a Linux **24 MiB virtual-address-space limit (`RLIMIT_AS`)**. This is **not** proof of a hard portable RSS cap, physical 2 GB hardware support, arbitrary GGUF compatibility or large-model inference. See [streamed decoder evidence](docs/STREAMED_DECODER.md) and [verified sessions](docs/VERIFIED_MODEL_SESSIONS.md).
+
+### 3. Intended connections (not yet complete)
+
+The integration roadmap is to extend the existing decoder with broader model/quantization support, benchmark-driven CPU and I/O scheduling, asynchronous prefetch where safe, stronger portable worker isolation and resource enforcement, and reproducible low-memory **physical hardware** evidence. Queue admission, worker planning and cache-pressure controls already have implemented pieces, but they are not a globally adaptive or OS-enforced scheduler. Remote providers, GPU, MoE, public API and desktop integration remain separate later milestones.
+
+### 4. PC → LLM Bridge → model drive → generated response
+
+This is the end-to-end path from a prompt on your PC to an accessible GGUF model, bounded local tensor reads, CPU inference and the returned response. **Solid animated arrows are implemented paths; dashed arrows are planned.** Animation uses Mermaid edge IDs and is visible only when the Markdown renderer supports animated edges; older renderers may display static arrows.
+
+```mermaid
+flowchart LR
+    PC["Your PC<br/>Prompt + CPU + RAM"] e1@--> Bridge["LLM Bridge<br/>Rust control and memory admission"]
+    Bridge e2@--> Source{"Model location?"}
+
+    Source e3@--> SSD["Internal SSD / HDD<br/>Local GGUF file"]
+    Source e4@--> External["Mounted external drive<br/>Local GGUF file"]
+    Source -.-> Google["Google Drive<br/>PLANNED — no adapter"]
+    Google -.-> Stage["Future OAuth + authenticated<br/>download and verified staging"]
+
+    SSD e5@--> Loader["GGUF tensor loader<br/>Bounded reads + source checks"]
+    External e6@--> Loader
+    Stage -.-> Loader
+    Loader e7@--> Decoder["Rust / C++ CPU decoder<br/>Attention, KV cache and SwiGLU"]
+    Decoder e8@--> Tokens["Generated tokens + optional logits"]
+    Tokens e9@--> Reply["Response returned to your PC"]
+
+    e1@{ animation: fast }
+    e2@{ animation: fast }
+    e3@{ animation: slow }
+    e4@{ animation: slow }
+    e5@{ animation: fast }
+    e6@{ animation: fast }
+    e7@{ animation: fast }
+    e8@{ animation: fast }
+    e9@{ animation: fast }
+
+    classDef runtime fill:#072942,stroke:#2b9ad6,color:#e9f6ff,stroke-width:1.5px
+    classDef drive fill:#0a3555,stroke:#1989c6,color:#e9f6ff
+    classDef future fill:#272c3a,stroke:#98a4b6,color:#e0e6f0,stroke-dasharray:5\,5
+    class PC,Bridge,Loader,Decoder,Tokens,Reply runtime
+    class SSD,External drive
+    class Google,Stage future
+```
+
+**Available now:** An internal disk or an OS-mounted external drive can supply a regular local GGUF file. The streamed backend indexes the tensor regions, bounds local reads and runs the supported CPU decoder. The optional trusted SHA-256 verified-session path currently has Linux-specific guarantees.
+
+**Planned, not implemented:** Google Drive or arbitrary remote URLs cannot be passed directly as model paths. A future cloud adapter would need account authorization, bounded/retriable transfer, validated local staging and session integrity before the existing file reader could use the bytes. The animation is a workflow illustration, **not** evidence of Google Drive support, hard physical RAM limits or large-model capability.
 
 ### Where to find the code
 
@@ -57,11 +185,15 @@ These are **engineering targets**, not a list of completed features. See [AGENTS
 | --- | --- |
 | `crates/llmbridge-cli/` | CLI entry point and developer commands |
 | `crates/llmbridge-core/src/inference.rs` | Resident/native inference and operator boundary |
-| `crates/llmbridge-core/src/streamed.rs`, `native/src/streamed.cpp` | Experimental complete streamed dense-Llama decoder |
+| `crates/llmbridge-core/src/streamed.rs`, `native/src/streamed.cpp` | Experimental dense-Llama prefill/decode using bounded tensor ranges and native CPU kernels |
 | `crates/llmbridge-core/src/gguf_index.rs` | GGUF metadata and tensor inventory |
 | `crates/llmbridge-core/src/storage.rs` | Bounded local file reads and source identity |
 | `crates/llmbridge-core/src/tensor_batch.rs` | Bounded indexed tensor-range operations |
 | `crates/llmbridge-core/src/tensor_cache.rs` | Budgeted chunk cache and revision isolation |
+| `crates/llmbridge-core/src/read_cache.rs` | Optional bounded per-session cache/read-ahead and related accounting |
+| `crates/llmbridge-core/src/queued_streamed.rs`, `streamed_executor.rs` | Queued streamed sessions, reservations and worker admission |
+| `crates/llmbridge-core/src/streamed_plan.rs`, `worker_plan.rs` | Native-derived context/KV and worker-capacity planning |
+| `crates/llmbridge-cli/src/batch.rs` | Bounded batch CLI execution |
 | `crates/llmbridge-core/src/f32_stream.rs` | Streamed F32 matrix-vector operations |
 | `crates/llmbridge-core/src/f32_chain.rs` | Two-stage F32 composition with caller-owned buffers |
 | `crates/llmbridge-core/src/f32_residual.rs` | Streamed F32 residual composition |
@@ -79,10 +211,10 @@ Some components are experimental and may change as graph integration progresses.
 | M0 foundation | Rust workspace, CLI, native build and basic inspection | Continue portability and safety checks |
 | M1 CPU baseline | Real GGUF tokenizer and native CPU generation; one small Q8 checkpoint matched pinned upstream greedy output in CI | Broader model families, cancellation and numerical validation |
 | GGUF inventory | Indexed tensor shapes/types/offsets and checked ranges; independent 57-tensor comparison recorded | More malformed-format and compatibility coverage |
-| Bounded storage | Range reader, source identity, optional integrity checks, cache budgeting | Connect reads to the **complete** native execution graph |
+| Bounded storage | Range reader, source identity, optional integrity checks and streamed-decoder tensor reads | Broader models, authenticated-session portability and stronger full-process limits |
 | Streamed decoder | Complete F32/Q8_0 dense-Llama path; pinned 15M output/logit and Linux address-space validation | Broader models, contexts, cache/prefetch and robustness |
 | Memory accounting | Linux RSS/PSS and cgroup-related instrumentation | **Enforced** process memory bounds under real model loads |
-| Adaptive planner | Early planning helpers | Full hardware-aware scheduling, KV-cache admission and benchmarks |
+| Adaptive planner | Native-derived context/KV/workspace estimates; worker queue, admission and optional cache-pressure controls | Full adaptive CPU/I/O scheduling and portable enforced worker limits |
 | Large-model low-RAM inference | **Not verified** | Correctness, OS survival, I/O and latency evidence on actual constrained hardware |
 | GPU and other formats | **Not advertised as supported** | Separate implementation and reproducible validation |
 
@@ -196,3 +328,7 @@ The dense Llama streamed path also accepts Q4_0 tensors through bounded row read
 `chat --backend streamed --cache-mb 1 --cache-pressure-mb 512 --metrics` can release optional cache allocations when effective available RAM drops below the floor. KV/context and authentication remain intact. The library also exposes a cooperative per-session release signal; no cache regrowth or RSS guarantee is implied. [Semantics and forced-signal validation](docs/RUNTIME_CACHE_PRESSURE.md).
 
 Linux memory admission includes headroom from every visible cgroup-v2 ancestor, including sibling usage. [Discovery, regression coverage and namespace limits](docs/CGROUP_MEMORY_ADMISSION.md).
+
+### Streamed batch jobs
+
+Run newline-delimited UTF-8 prompts with `llmbridge batch model.gguf --input prompts.txt --output-dir new-results --workers 2 --sha256 TRUSTED_SHA256`. A shared planned executor processes bounded input per worker and streams each response to its own file. Existing outputs are protected; admission timeout and optional pressure hysteresis are available. See [batch CLI](docs/BATCH_CLI.md) for defaults, cancellation and accounting limits.
